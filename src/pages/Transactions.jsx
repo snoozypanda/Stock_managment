@@ -1,13 +1,22 @@
-import React, { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Calendar, Filter } from 'lucide-react';
-import { collection, query, orderBy, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
+import React, { useState, useEffect } from "react";
+import { TrendingUp, TrendingDown, Calendar, Filter } from "lucide-react";
+import { collection, query, orderBy, onSnapshot } from "firebase/firestore";
+import { db } from "../firebase";
+import {
+  ref as dbRef,
+  onValue,
+  off,
+  query as dbQuery,
+  orderByChild,
+  limitToLast,
+} from "firebase/database";
+import { database } from "../firebase";
 
 const Transactions = () => {
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filterType, setFilterType] = useState('');
-  const [dateFilter, setDateFilter] = useState('');
+  const [filterType, setFilterType] = useState("");
+  const [dateFilter, setDateFilter] = useState("");
 
   // Dummy data for demonstration
   const dummyTransactions = [
@@ -18,7 +27,7 @@ const Transactions = () => {
       quantity: 150,
       date: new Date(Date.now() - 2 * 60 * 60 * 1000), // 2 hours ago
       handledBy: "user123",
-      pipelineId: "pipeline1"
+      pipelineId: "pipeline1",
     },
     {
       id: "2",
@@ -27,7 +36,7 @@ const Transactions = () => {
       quantity: 75,
       date: new Date(Date.now() - 4 * 60 * 60 * 1000), // 4 hours ago
       handledBy: "user123",
-      pipelineId: "pipeline2"
+      pipelineId: "pipeline2",
     },
     {
       id: "3",
@@ -36,7 +45,7 @@ const Transactions = () => {
       quantity: 200,
       date: new Date(Date.now() - 6 * 60 * 60 * 1000), // 6 hours ago
       handledBy: "user456",
-      pipelineId: "pipeline3"
+      pipelineId: "pipeline3",
     },
     {
       id: "4",
@@ -45,7 +54,7 @@ const Transactions = () => {
       quantity: 45,
       date: new Date(Date.now() - 8 * 60 * 60 * 1000), // 8 hours ago
       handledBy: "user123",
-      pipelineId: "pipeline1"
+      pipelineId: "pipeline1",
     },
     {
       id: "5",
@@ -54,7 +63,7 @@ const Transactions = () => {
       quantity: 120,
       date: new Date(Date.now() - 12 * 60 * 60 * 1000), // 12 hours ago
       handledBy: "user789",
-      pipelineId: "pipeline4"
+      pipelineId: "pipeline4",
     },
     {
       id: "6",
@@ -63,7 +72,7 @@ const Transactions = () => {
       quantity: 60,
       date: new Date(Date.now() - 16 * 60 * 60 * 1000), // 16 hours ago
       handledBy: "user456",
-      pipelineId: "pipeline5"
+      pipelineId: "pipeline5",
     },
     {
       id: "7",
@@ -72,7 +81,7 @@ const Transactions = () => {
       quantity: 90,
       date: new Date(Date.now() - 20 * 60 * 60 * 1000), // 20 hours ago
       handledBy: "user123",
-      pipelineId: "pipeline7"
+      pipelineId: "pipeline7",
     },
     {
       id: "8",
@@ -81,7 +90,7 @@ const Transactions = () => {
       quantity: 25,
       date: new Date(Date.now() - 24 * 60 * 60 * 1000), // 1 day ago
       handledBy: "user789",
-      pipelineId: "pipeline8"
+      pipelineId: "pipeline8",
     },
     {
       id: "9",
@@ -90,7 +99,7 @@ const Transactions = () => {
       quantity: 40,
       date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), // 2 days ago
       handledBy: "user456",
-      pipelineId: "pipeline6"
+      pipelineId: "pipeline6",
     },
     {
       id: "10",
@@ -99,24 +108,30 @@ const Transactions = () => {
       quantity: 30,
       date: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000), // 3 days ago
       handledBy: "user123",
-      pipelineId: "pipeline1"
-    }
+      pipelineId: "pipeline1",
+    },
   ];
 
-  // Helper function to safely format dates from both regular Date objects and Firestore Timestamps
+  /**
+   * Safe Date Converter: formatDate
+   * -------------------------------
+   * Adapts date data of varying database origins (Firestore/Realtime Database/Mocks)
+   * into standard native JS Date instances. Crucial for consistent chronological sorting, 
+   * date filters, and localization strings across the ledger system.
+   */
   const formatDate = (date) => {
     if (!date) return "N/A";
-    
+
     // If it's a Firestore Timestamp, convert it to Date
-    if (date && typeof date.toDate === 'function') {
+    if (date && typeof date.toDate === "function") {
       return new Date(date.toDate());
     }
-    
+
     // If it's already a Date object, return it directly
     if (date instanceof Date) {
       return date;
     }
-    
+
     // If it's a string or other format, try to create a Date
     try {
       return new Date(date);
@@ -125,45 +140,150 @@ const Transactions = () => {
     }
   };
 
+  /**
+   * Real-time Transactions Sync Hook
+   * --------------------------------
+   * Establishes real-time listeners for the continuous historical ledger.
+   * Just like the dashboard, it implements a primary subscription onto Firestore with 
+   * an automatic redirect to Realtime Database if any permission/connection issue arises,
+   * resolving with mock entries as a fallback safety net.
+   */
   useEffect(() => {
-    const q = query(collection(db, 'transactions'), orderBy('date', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const transactionList = [];
-      snapshot.forEach((doc) => {
-        transactionList.push({ id: doc.id, ...doc.data() });
-      });
-      
-      // Use real data if available, otherwise use dummy data
-      if (transactionList.length > 0) {
-        setTransactions(transactionList);
-      } else {
-        setTransactions(dummyTransactions);
-      }
-      setLoading(false);
-    }, (error) => {
-      console.log("Firebase connection error, using dummy data:", error);
-      // If Firebase fails, use dummy data
-      setTransactions(dummyTransactions);
-      setLoading(false);
-    });
+    // Try to connect to Firestore first
+    let unsubscribeFirestore = null;
+    let unsubscribeRealtime = null;
 
-    return () => unsubscribe();
+    const connectToFirestore = async () => {
+      try {
+        const q = query(
+          collection(db, "transactions"),
+          orderBy("date", "desc")
+        );
+        const unsubscribe = onSnapshot(
+          q,
+          (snapshot) => {
+            const transactionList = [];
+            snapshot.forEach((doc) => {
+              transactionList.push({ id: doc.id, ...doc.data() });
+            });
+
+            // Use real data if available, otherwise use dummy data
+            if (transactionList.length > 0) {
+              console.log(
+                "Firestore transactions loaded:",
+                transactionList.length,
+                "transactions"
+              );
+              setTransactions(transactionList);
+            } else {
+              console.log("No Firestore transactions, using dummy data");
+              setTransactions(dummyTransactions);
+            }
+            setLoading(false);
+          },
+          (error) => {
+            console.log("Firestore connection error:", error);
+            // Try Realtime Database as fallback
+            connectToRealtimeDatabase();
+          }
+        );
+        unsubscribeFirestore = unsubscribe;
+      } catch (error) {
+        console.log("Firestore setup error:", error);
+        connectToRealtimeDatabase();
+      }
+    };
+
+    const connectToRealtimeDatabase = async () => {
+      try {
+        console.log("Connecting to Realtime Database for transactions...");
+
+        // Import the necessary functions for Realtime Database
+        const transactionsRef = dbRef(database, "transactions");
+
+        const unsubscribe = onValue(
+          transactionsRef,
+          (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+              const transactionList = Object.keys(data)
+                .map((key) => ({
+                  id: key,
+                  ...data[key],
+                }))
+                .sort((a, b) => {
+                  // Sort by date descending (newest first)
+                  const dateA = a.date ? new Date(a.date) : new Date(0);
+                  const dateB = b.date ? new Date(b.date) : new Date(0);
+                  return dateB - dateA;
+                });
+
+              console.log(
+                "Realtime Database transactions loaded:",
+                transactionList.length,
+                "transactions"
+              );
+              setTransactions(transactionList);
+            } else {
+              console.log(
+                "No Realtime Database transactions, using dummy data"
+              );
+              setTransactions(dummyTransactions);
+            }
+            setLoading(false);
+          },
+          (error) => {
+            console.log("Realtime Database error:", error);
+            // Use dummy data as final fallback
+            setTransactions(dummyTransactions);
+            setLoading(false);
+          }
+        );
+
+        unsubscribeRealtime = () => off(transactionsRef, "value", unsubscribe);
+      } catch (error) {
+        console.log("Realtime Database setup error:", error);
+        // Use dummy data as final fallback
+        setTransactions(dummyTransactions);
+        setLoading(false);
+      }
+    };
+
+    // Start with Firestore
+    connectToFirestore();
+
+    return () => {
+      if (unsubscribeFirestore) {
+        unsubscribeFirestore();
+      }
+      if (unsubscribeRealtime) {
+        unsubscribeRealtime();
+      }
+    };
   }, []);
 
-  const filteredTransactions = transactions.filter(transaction => {
+  /**
+   * Computed Query Selector: filteredTransactions
+   * ---------------------------------------------
+   * Performs client-side high-performance filtering on the unified transactions array.
+   * Dynamically updates listing whenever the type selector (`incoming` / `outgoing`) 
+   * or the calendar-based day filter changes.
+   */
+  const filteredTransactions = transactions.filter((transaction) => {
     const matchesType = !filterType || transaction.type === filterType;
-    
+
     // Safely format the date for comparison
     const transactionDate = formatDate(transaction.date);
-    const matchesDate = !dateFilter || 
-      (transactionDate && 
-       transactionDate.toDateString() === new Date(dateFilter).toDateString());
-    
+    const matchesDate =
+      !dateFilter ||
+      (transactionDate &&
+        transactionDate.toDateString() === new Date(dateFilter).toDateString());
+
     return matchesType && matchesDate;
   });
 
   const getTransactionIcon = (type) => {
-    return type === 'incoming' ? (
+    return type === "incoming" ? (
       <TrendingUp className="h-5 w-5 text-green-600" />
     ) : (
       <TrendingDown className="h-5 w-5 text-red-600" />
@@ -171,11 +291,13 @@ const Transactions = () => {
   };
 
   const getTransactionColor = (type) => {
-    return type === 'incoming' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
+    return type === "incoming"
+      ? "bg-green-100 text-green-800"
+      : "bg-red-100 text-red-800";
   };
 
   const getTransactionText = (type) => {
-    return type === 'incoming' ? 'Stock Added' : 'Stock Removed';
+    return type === "incoming" ? "Stock Added" : "Stock Removed";
   };
 
   if (loading) {
@@ -189,7 +311,9 @@ const Transactions = () => {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">Transaction History</h1>
+        <h1 className="text-2xl font-bold text-gray-900">
+          Transaction History
+        </h1>
         <p className="mt-1 text-sm text-gray-600">
           Track all stock movements and inventory changes
         </p>
@@ -212,7 +336,7 @@ const Transactions = () => {
               <option value="outgoing">Outgoing Stock</option>
             </select>
           </div>
-          
+
           <div className="relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
               <Calendar className="h-5 w-5 text-gray-400" />
@@ -234,41 +358,50 @@ const Transactions = () => {
             Transactions ({filteredTransactions.length})
           </h3>
         </div>
-        
+
         <div className="divide-y divide-gray-200">
           {filteredTransactions.length > 0 ? (
             filteredTransactions.map((transaction) => (
               <div key={transaction.id} className="p-6 hover:bg-gray-50">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-4">
-                    <div className={`flex-shrink-0 h-10 w-10 rounded-full flex items-center justify-center ${getTransactionColor(transaction.type)}`}>
+                    <div
+                      className={`flex-shrink-0 h-10 w-10 rounded-full flex items-center justify-center ${getTransactionColor(
+                        transaction.type
+                      )}`}
+                    >
                       {getTransactionIcon(transaction.type)}
                     </div>
-                    
+
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900">
                         {getTransactionText(transaction.type)}
                       </p>
                       <p className="text-sm text-gray-500">
-                        {transaction.pipelineType} • {transaction.quantity} units
+                        {transaction.pipelineType} • {transaction.quantity}{" "}
+                        units
                       </p>
                       <p className="text-xs text-gray-400">
                         Transaction ID: {transaction.id.slice(-8)}
                       </p>
                     </div>
                   </div>
-                  
+
                   <div className="text-right">
                     <p className="text-sm text-gray-900">
                       {(() => {
                         const formattedDate = formatDate(transaction.date);
-                        return formattedDate ? formattedDate.toLocaleDateString() : 'N/A';
+                        return formattedDate
+                          ? formattedDate.toLocaleDateString()
+                          : "N/A";
                       })()}
                     </p>
                     <p className="text-xs text-gray-500">
                       {(() => {
                         const formattedDate = formatDate(transaction.date);
-                        return formattedDate ? formattedDate.toLocaleTimeString() : '';
+                        return formattedDate
+                          ? formattedDate.toLocaleTimeString()
+                          : "";
                       })()}
                     </p>
                   </div>
@@ -278,9 +411,13 @@ const Transactions = () => {
           ) : (
             <div className="text-center py-12">
               <Calendar className="mx-auto h-12 w-12 text-gray-400" />
-              <h3 className="mt-2 text-sm font-medium text-gray-900">No transactions found</h3>
+              <h3 className="mt-2 text-sm font-medium text-gray-900">
+                No transactions found
+              </h3>
               <p className="mt-1 text-sm text-gray-500">
-                {filterType || dateFilter ? 'Try adjusting your filters.' : 'Start managing your inventory to see transactions here.'}
+                {filterType || dateFilter
+                  ? "Try adjusting your filters."
+                  : "Start managing your inventory to see transactions here."}
               </p>
             </div>
           )}
@@ -294,46 +431,64 @@ const Transactions = () => {
             <div className="flex items-center">
               <TrendingUp className="h-5 w-5 text-green-600 mr-2" />
               <div>
-                <p className="text-sm font-medium text-gray-500">Total Incoming</p>
+                <p className="text-sm font-medium text-gray-500">
+                  Total Incoming
+                </p>
                 <p className="text-lg font-semibold text-gray-900">
                   {filteredTransactions
-                    .filter(t => t.type === 'incoming')
+                    .filter((t) => t.type === "incoming")
                     .reduce((sum, t) => sum + (t.quantity || 0), 0)
-                    .toLocaleString()} units
+                    .toLocaleString()}{" "}
+                  units
                 </p>
               </div>
             </div>
           </div>
-          
+
           <div className="bg-white p-4 rounded-lg shadow">
             <div className="flex items-center">
               <TrendingDown className="h-5 w-5 text-red-600 mr-2" />
               <div>
-                <p className="text-sm font-medium text-gray-500">Total Outgoing</p>
+                <p className="text-sm font-medium text-gray-500">
+                  Total Outgoing
+                </p>
                 <p className="text-lg font-semibold text-gray-900">
                   {filteredTransactions
-                    .filter(t => t.type === 'outgoing')
+                    .filter((t) => t.type === "outgoing")
                     .reduce((sum, t) => sum + (t.quantity || 0), 0)
-                    .toLocaleString()} units
+                    .toLocaleString()}{" "}
+                  units
                 </p>
               </div>
             </div>
           </div>
-          
+
           <div className="bg-white p-4 rounded-lg shadow">
             <div className="flex items-center">
               <Calendar className="h-5 w-5 text-blue-600 mr-2" />
               <div>
                 <p className="text-sm font-medium text-gray-500">Net Change</p>
-                <p className={`text-lg font-semibold ${
-                  filteredTransactions
-                    .reduce((sum, t) => sum + (t.type === 'incoming' ? t.quantity : -t.quantity), 0) >= 0
-                    ? 'text-green-600'
-                    : 'text-red-600'
-                }`}>
+                <p
+                  className={`text-lg font-semibold ${
+                    filteredTransactions.reduce(
+                      (sum, t) =>
+                        sum +
+                        (t.type === "incoming" ? t.quantity : -t.quantity),
+                      0
+                    ) >= 0
+                      ? "text-green-600"
+                      : "text-red-600"
+                  }`}
+                >
                   {filteredTransactions
-                    .reduce((sum, t) => sum + (t.type === 'incoming' ? t.quantity : -t.quantity), 0)
-                    .toLocaleString()} units
+                    .reduce(
+                      (sum, t) =>
+                        sum +
+                        (t.type === "incoming" ? t.quantity : -t.quantity),
+                      0
+                    )
+                    .toLocaleString()}{" "}
+                  units
                 </p>
               </div>
             </div>

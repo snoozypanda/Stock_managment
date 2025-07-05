@@ -46,6 +46,16 @@ const Dashboard = () => {
     navigate("/transactions");
   };
 
+  /**
+   * Quick Action: handleQuickAdd
+   * ----------------------------
+   * Robust stock insertion handler. 
+   * Attempts a two-tier database write strategy to maximize uptime:
+   * 1. Primary: Firestore (collection: 'pipelines' and 'transactions').
+   * 2. Fallback: Firebase Realtime Database (paths: 'pipelines/' and 'transactions/').
+   * 
+   * Includes full error containment, parsing validation, and immediate UI feedback.
+   */
   const handleQuickAdd = async (stockData) => {
     try {
       // Check if user is authenticated
@@ -263,98 +273,271 @@ const Dashboard = () => {
     },
   };
 
+  /**
+   * Dashboard Real-time Subscription Hook
+   * -------------------------------------
+   * Subscribes to real-time updates for inventory (pipelines) and recent transactions.
+   * Orchestrates dynamic failover between Firestore and Realtime Database:
+   * 
+   * - If Firestore connection or snapshot subscription fails, it immediately activates
+   *   the `connectToRealtimeDatabase` fallback routine.
+   * - If both fail, it falls back to high-fidelity dummy metrics so the app remains usable.
+   * - Strictly implements a cleanup routine returning unsubscribe hooks to prevent memory leaks.
+   */
   useEffect(() => {
-    // Listen to inventory changes
-    const inventoryQuery = query(collection(db, "pipelines"));
-    const unsubscribeInventory = onSnapshot(
-      inventoryQuery,
-      (snapshot) => {
-        const items = [];
-        let totalQuantity = 0;
-        let lowStockCount = 0;
+    // Try to connect to Firestore first
+    let unsubscribeFirestoreInventory = null;
+    let unsubscribeFirestoreTransactions = null;
+    let unsubscribeRealtimeInventory = null;
+    let unsubscribeRealtimeTransactions = null;
 
-        snapshot.forEach((doc) => {
-          const item = { id: doc.id, ...doc.data() };
-          items.push(item);
-          totalQuantity += item.quantity || 0;
-          if (item.quantity <= 5) {
-            lowStockCount++;
+    const connectToFirestore = async () => {
+      try {
+        // Listen to inventory changes
+        const inventoryQuery = query(collection(db, "pipelines"));
+        const unsubscribeInventory = onSnapshot(
+          inventoryQuery,
+          (snapshot) => {
+            const items = [];
+            let totalQuantity = 0;
+            let lowStockCount = 0;
+
+            snapshot.forEach((doc) => {
+              const item = { id: doc.id, ...doc.data() };
+              items.push(item);
+              totalQuantity += item.quantity || 0;
+              if (item.quantity <= 5) {
+                lowStockCount++;
+              }
+            });
+
+            // Use real data if available, otherwise use dummy data
+            if (items.length > 0) {
+              console.log("Firestore inventory loaded:", items.length, "items");
+              setStats((prev) => ({
+                ...prev,
+                totalItems: items.length,
+                totalQuantity,
+                lowStockItems: lowStockCount,
+              }));
+            } else {
+              console.log("No Firestore inventory, using dummy data");
+              setStats((prev) => ({
+                ...prev,
+                totalItems: dummyStats.totalItems,
+                totalQuantity: dummyStats.totalQuantity,
+                lowStockItems: dummyStats.lowStockItems,
+              }));
+            }
+          },
+          (error) => {
+            console.log("Firestore inventory error:", error);
+            connectToRealtimeDatabase();
           }
-        });
+        );
 
-        // Use real data if available, otherwise use dummy data
-        if (items.length > 0) {
-          setStats((prev) => ({
-            ...prev,
-            totalItems: items.length,
-            totalQuantity,
-            lowStockItems: lowStockCount,
-          }));
-        } else {
-          // Set dummy data if no real data exists
-          setStats((prev) => ({
-            ...prev,
-            totalItems: dummyStats.totalItems,
-            totalQuantity: dummyStats.totalQuantity,
-            lowStockItems: dummyStats.lowStockItems,
-          }));
-        }
-      },
-      (error) => {
-        console.log("Firebase connection error, using dummy data:", error);
-        // If Firebase fails, use dummy data
+        // Listen to recent transactions
+        const transactionsQuery = query(
+          collection(db, "transactions"),
+          orderBy("date", "desc"),
+          limit(5)
+        );
+        const unsubscribeTransactions = onSnapshot(
+          transactionsQuery,
+          (snapshot) => {
+            const transactions = [];
+            snapshot.forEach((doc) => {
+              transactions.push({ id: doc.id, ...doc.data() });
+            });
+
+            // Use real data if available, otherwise use dummy data
+            if (transactions.length > 0) {
+              console.log(
+                "Firestore transactions loaded:",
+                transactions.length,
+                "transactions"
+              );
+              setStats((prev) => ({
+                ...prev,
+                recentTransactions: transactions,
+              }));
+            } else {
+              console.log("No Firestore transactions, using dummy data");
+              setStats((prev) => ({
+                ...prev,
+                recentTransactions: dummyStats.recentTransactions,
+              }));
+            }
+            setLoading(false);
+          },
+          (error) => {
+            console.log("Firestore transactions error:", error);
+            connectToRealtimeDatabase();
+          }
+        );
+
+        unsubscribeFirestoreInventory = unsubscribeInventory;
+        unsubscribeFirestoreTransactions = unsubscribeTransactions;
+      } catch (error) {
+        console.log("Firestore setup error:", error);
+        connectToRealtimeDatabase();
+      }
+    };
+
+    const connectToRealtimeDatabase = async () => {
+      try {
+        console.log("Connecting to Realtime Database for dashboard...");
+
+        // Import the necessary functions for Realtime Database
+        const {
+          ref: dbRef,
+          onValue,
+          off,
+          query: dbQuery,
+          orderByChild,
+          limitToLast,
+        } = await import("firebase/database");
+
+        // Listen to inventory changes
+        const inventoryRef = dbRef(database, "pipelines");
+        const unsubscribeInventory = onValue(
+          inventoryRef,
+          (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+              const items = Object.keys(data).map((key) => ({
+                id: key,
+                ...data[key],
+              }));
+
+              let totalQuantity = 0;
+              let lowStockCount = 0;
+
+              items.forEach((item) => {
+                totalQuantity += item.quantity || 0;
+                if (item.quantity <= 5) {
+                  lowStockCount++;
+                }
+              });
+
+              console.log(
+                "Realtime Database inventory loaded:",
+                items.length,
+                "items"
+              );
+              setStats((prev) => ({
+                ...prev,
+                totalItems: items.length,
+                totalQuantity,
+                lowStockItems: lowStockCount,
+              }));
+            } else {
+              console.log("No Realtime Database inventory, using dummy data");
+              setStats((prev) => ({
+                ...prev,
+                totalItems: dummyStats.totalItems,
+                totalQuantity: dummyStats.totalQuantity,
+                lowStockItems: dummyStats.lowStockItems,
+              }));
+            }
+          },
+          (error) => {
+            console.log("Realtime Database inventory error:", error);
+            // Use dummy data as final fallback
+            setStats((prev) => ({
+              ...prev,
+              totalItems: dummyStats.totalItems,
+              totalQuantity: dummyStats.totalQuantity,
+              lowStockItems: dummyStats.lowStockItems,
+            }));
+          }
+        );
+
+        // Listen to recent transactions
+        const transactionsRef = dbRef(database, "transactions");
+        const unsubscribeTransactions = onValue(
+          transactionsRef,
+          (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+              const transactions = Object.keys(data)
+                .map((key) => ({
+                  id: key,
+                  ...data[key],
+                }))
+                .sort((a, b) => {
+                  // Sort by date descending (newest first)
+                  const dateA = a.date ? new Date(a.date) : new Date(0);
+                  const dateB = b.date ? new Date(b.date) : new Date(0);
+                  return dateB - dateA;
+                })
+                .slice(0, 5); // Limit to 5 most recent
+
+              console.log(
+                "Realtime Database transactions loaded:",
+                transactions.length,
+                "transactions"
+              );
+              setStats((prev) => ({
+                ...prev,
+                recentTransactions: transactions,
+              }));
+            } else {
+              console.log(
+                "No Realtime Database transactions, using dummy data"
+              );
+              setStats((prev) => ({
+                ...prev,
+                recentTransactions: dummyStats.recentTransactions,
+              }));
+            }
+            setLoading(false);
+          },
+          (error) => {
+            console.log("Realtime Database transactions error:", error);
+            // Use dummy data as final fallback
+            setStats((prev) => ({
+              ...prev,
+              recentTransactions: dummyStats.recentTransactions,
+            }));
+            setLoading(false);
+          }
+        );
+
+        unsubscribeRealtimeInventory = () =>
+          off(inventoryRef, "value", unsubscribeInventory);
+        unsubscribeRealtimeTransactions = () =>
+          off(transactionsRef, "value", unsubscribeTransactions);
+      } catch (error) {
+        console.log("Realtime Database setup error:", error);
+        // Use dummy data as final fallback
         setStats((prev) => ({
           ...prev,
           totalItems: dummyStats.totalItems,
           totalQuantity: dummyStats.totalQuantity,
           lowStockItems: dummyStats.lowStockItems,
-        }));
-      }
-    );
-
-    // Listen to recent transactions
-    const transactionsQuery = query(
-      collection(db, "transactions"),
-      orderBy("date", "desc"),
-      limit(5)
-    );
-    const unsubscribeTransactions = onSnapshot(
-      transactionsQuery,
-      (snapshot) => {
-        const transactions = [];
-        snapshot.forEach((doc) => {
-          transactions.push({ id: doc.id, ...doc.data() });
-        });
-
-        // Use real data if available, otherwise use dummy data
-        if (transactions.length > 0) {
-          setStats((prev) => ({
-            ...prev,
-            recentTransactions: transactions,
-          }));
-        } else {
-          // Set dummy transactions if no real data exists
-          setStats((prev) => ({
-            ...prev,
-            recentTransactions: dummyStats.recentTransactions,
-          }));
-        }
-        setLoading(false);
-      },
-      (error) => {
-        console.log("Firebase transactions error, using dummy data:", error);
-        // If Firebase fails, use dummy data
-        setStats((prev) => ({
-          ...prev,
           recentTransactions: dummyStats.recentTransactions,
         }));
         setLoading(false);
       }
-    );
+    };
+
+    // Start with Firestore
+    connectToFirestore();
 
     return () => {
-      unsubscribeInventory();
-      unsubscribeTransactions();
+      if (unsubscribeFirestoreInventory) {
+        unsubscribeFirestoreInventory();
+      }
+      if (unsubscribeFirestoreTransactions) {
+        unsubscribeFirestoreTransactions();
+      }
+      if (unsubscribeRealtimeInventory) {
+        unsubscribeRealtimeInventory();
+      }
+      if (unsubscribeRealtimeTransactions) {
+        unsubscribeRealtimeTransactions();
+      }
     };
   }, []);
 
@@ -382,7 +565,16 @@ const Dashboard = () => {
   );
 
   const TransactionItem = ({ transaction }) => {
-    // Helper function to safely format dates from both regular Date objects and Firestore Timestamps
+    /**
+     * Helper: formatDate
+     * ------------------
+     * Polymorphic date-parsing utility. Real-time changes might supply dates as:
+     * - Firestore Timestamps (containing `.toDate()`)
+     * - ISO string representations (from Realtime Database JSON)
+     * - Native Javascript Date objects (from mock/local updates)
+     * 
+     * Safely parses all variants and standardizes rendering into local format.
+     */
     const formatDate = (date) => {
       if (!date) return "N/A";
 
@@ -509,128 +701,6 @@ const Dashboard = () => {
               </p>
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Monthly Statistics */}
-      <div className="mt-8 bg-white shadow rounded-lg">
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h3 className="text-lg font-medium text-gray-900">
-            Monthly Overview
-          </h3>
-        </div>
-        <div className="p-6">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="bg-blue-50 p-4 rounded-lg">
-              <div className="flex items-center">
-                <TrendingUp className="h-8 w-8 text-blue-600" />
-                <div className="ml-3">
-                  <p className="text-sm font-medium text-blue-600">
-                    Total Incoming
-                  </p>
-                  <p className="text-2xl font-bold text-blue-900">1,250</p>
-                </div>
-              </div>
-            </div>
-            <div className="bg-red-50 p-4 rounded-lg">
-              <div className="flex items-center">
-                <TrendingDown className="h-8 w-8 text-red-600" />
-                <div className="ml-3">
-                  <p className="text-sm font-medium text-red-600">
-                    Total Outgoing
-                  </p>
-                  <p className="text-2xl font-bold text-red-900">890</p>
-                </div>
-              </div>
-            </div>
-            <div className="bg-green-50 p-4 rounded-lg">
-              <div className="flex items-center">
-                <BarChart3 className="h-8 w-8 text-green-600" />
-                <div className="ml-3">
-                  <p className="text-sm font-medium text-green-600">
-                    Net Change
-                  </p>
-                  <p className="text-2xl font-bold text-green-900">+360</p>
-                </div>
-              </div>
-            </div>
-            <div className="bg-purple-50 p-4 rounded-lg">
-              <div className="flex items-center">
-                <Package className="h-8 w-8 text-purple-600" />
-                <div className="ml-3">
-                  <p className="text-sm font-medium text-purple-600">
-                    Top Product
-                  </p>
-                  <p className="text-lg font-bold text-purple-900">
-                    Steel Pipes
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Inventory Overview */}
-      <div className="mt-8 bg-white shadow rounded-lg">
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h3 className="text-lg font-medium text-gray-900">
-            Inventory Overview
-          </h3>
-        </div>
-        <div className="p-6">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Product
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Category
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Quantity
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {dummyStats.inventoryItems.map((item) => (
-                  <tr key={item.id}>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">
-                        {item.name}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">
-                        {item.category}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                      {item.quantity} {item.unit}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span
-                        className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                          item.status === "In Stock"
-                            ? "bg-green-100 text-green-800"
-                            : item.status === "Low Stock"
-                            ? "bg-yellow-100 text-yellow-800"
-                            : "bg-red-100 text-red-800"
-                        }`}
-                      >
-                        {item.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </div>
       </div>
 
